@@ -299,7 +299,7 @@ using coroutine_handle = std::coroutine_handle<detail::promise_base>;
 {
     // TODO[lab1]: Add you codes
     auto task_handle = coroutine_handle::from_address(handle.address());
-    if (task_handle.promise().detached && handle.done()){
+    if (task_handle.promise().detached){
         task_handle.destroy();
     }
 }
