@@ -48,14 +48,31 @@ struct promise_base
     promise_base() noexcept = default;
     ~promise_base()         = default;
 
-    constexpr auto initial_suspend() noexcept { return std::suspend_always{}; }
+    std::coroutine_handle<> parent{nullptr};
+    bool detached{ false };
 
-    [[CORO_TEST_USED(lab1)]] auto final_suspend() noexcept -> std::suspend_always
+    constexpr auto initial_suspend() noexcept{ return std::suspend_always{}; }
+
+    struct FinalAwaiter{
+        constexpr bool await_ready() const noexcept{ return false; }
+
+        template<typename promise_type>
+        constexpr std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> cur_handle) const noexcept{
+            if (cur_handle.promise().parent){
+                return cur_handle.promise().parent;
+            }
+            return std::noop_coroutine();
+        }
+
+        constexpr void await_resume() const noexcept{}
+    };
+
+    [[CORO_TEST_USED(lab1)]] auto final_suspend() noexcept
     {
         // TODO[lab1]: Add you codes
         // Return suspend_always is incorrect,
         // so you should modify the return type and define new awaiter to return
-        return {};
+        return FinalAwaiter{};
     }
 
 #ifdef ENABLE_MEMORY_ALLOC
@@ -169,6 +186,7 @@ public:
         auto await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept -> std::coroutine_handle<>
         {
             // TODO[lab1]: Add you codes
+            m_coroutine.promise().parent = awaiting_coroutine;
             return m_coroutine;
         }
 
@@ -235,6 +253,8 @@ public:
     [[CORO_TEST_USED(lab1)]] auto detach() -> void
     {
         // TODO[lab1]: Add you codes
+        m_coroutine.promise().detached = true;
+        m_coroutine = nullptr;
     }
 
     auto operator co_await() const& noexcept
@@ -278,6 +298,10 @@ using coroutine_handle = std::coroutine_handle<detail::promise_base>;
 [[CORO_TEST_USED(lab1)]] inline auto clean(std::coroutine_handle<> handle) noexcept -> void
 {
     // TODO[lab1]: Add you codes
+    auto task_handle = coroutine_handle::from_address(handle.address());
+    if (task_handle.promise().detached && handle.done()){
+        task_handle.destroy();
+    }
 }
 
 namespace detail

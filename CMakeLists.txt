@@ -48,7 +48,7 @@ set(THIRD_PARTY_INCLUDE_DIR
     "${PROJECT_SOURCE_DIR}/third_party/benchmark/include")
 
 option(ENABLE_UNIT_TESTS "Enable unit tests" ON)
-option(ENABLE_DEBUG_MODE "Enable debug mode" OFF)
+option(ENABLE_DEBUG_MODE "Enable debug mode" ON)
 option(ENABLE_BUILD_SHARED_LIBS "Enable build shared libs" OFF)
 cmake_dependent_option(ENABLE_COMPILE_OPTIMIZE "Enable compile options -O3" ON "NOT ENABLE_DEBUG_MODE" OFF)
 
