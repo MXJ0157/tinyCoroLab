@@ -39,7 +39,7 @@ struct marked_buffer
 
     void set_data(const std::vector<Type>& values)
     {
-        assert(data.size() == length && "");
+        assert(values.size() == length && "");
 
         for (int i = 0; i < length; i++)
         {

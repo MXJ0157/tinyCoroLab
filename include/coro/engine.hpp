@@ -28,7 +28,7 @@ class context;
 };
 
 /**
- * @brief Welcome to tinycoro lab2a, in this part you will build the heart of tinycoro¡ª¡ªengine by
+ * @brief Welcome to tinycoro lab2a, in this part you will build the heart of tinycoroï¿½ï¿½ï¿½ï¿½engine by
  * modifing engine.hpp and engine.cpp, please ensure you have read the document of lab2a.
  *
  * @warning You should carefully consider whether each implementation should be thread-safe.
@@ -163,21 +163,24 @@ public:
      *
      * @return uring_proxy&
      */
-    inline auto get_uring() noexcept -> uring_proxy& { return m_upxy; }
+    inline auto get_uring() noexcept -> uring_proxy& { return m_uringpxy; }
 
     // TODO[lab2a]: Add more function if you need
 
 private:
     uint32_t    m_id;
-    uring_proxy m_upxy;
+    uring_proxy m_uringpxy;
 
     // store task handle
     mpmc_queue<coroutine_handle<>> m_task_queue; // You can replace it with another data structure
 
     // used to fetch cqe entry
-    array<urcptr, config::kQueCap> m_urc;
+    array<urcptr, config::kQueCap> m_urcqes;
 
     // TODO[lab2a]: Add more member variables if you need
+    std::atomic<size_t> m_todoTasks{0};
+    std::atomic<size_t> m_toSubmitIo{0};
+    std::atomic<size_t> m_runningIo{0};
 };
 
 /**
