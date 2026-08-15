@@ -137,6 +137,9 @@ public:
     [[CORO_TEST_USED(lab2b)]] auto run(stop_token token) noexcept -> void;
 
     // TODO[lab2b]: Add more function if you need
+    [[CORO_TEST_USED(lab2b)]] bool finish_all();
+
+    [[CORO_TEST_USED(lab2b)]] void setSchd(scheduler* schd);
 
 private:
     CORO_ALIGN engine   m_engine;
@@ -144,6 +147,8 @@ private:
     ctx_id              m_id;
 
     // TODO[lab2b]: Add more member variables if you need
+    atomic<size_t> coroutine_wait_count{ 0 };
+    scheduler* schd;
 };
 
 inline context& local_context() noexcept

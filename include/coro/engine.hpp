@@ -166,6 +166,7 @@ public:
     inline auto get_uring() noexcept -> uring_proxy& { return m_uringpxy; }
 
     // TODO[lab2a]: Add more function if you need
+    void wake_up(int val);
 
 private:
     uint32_t    m_id;
@@ -178,7 +179,6 @@ private:
     array<urcptr, config::kQueCap> m_urcqes;
 
     // TODO[lab2a]: Add more member variables if you need
-    std::atomic<size_t> m_todoTasks{0};
     std::atomic<size_t> m_toSubmitIo{0};
     std::atomic<size_t> m_runningIo{0};
 };

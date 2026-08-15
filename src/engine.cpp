@@ -23,7 +23,7 @@ auto engine::deinit() noexcept -> void
 auto engine::ready() noexcept -> bool
 {
     // TODO[lab2a]: Add you codes
-    return m_todoTasks > 0;
+    return !m_task_queue.was_empty();
 }
 
 auto engine::get_free_urs() noexcept -> ursptr
@@ -35,14 +35,13 @@ auto engine::get_free_urs() noexcept -> ursptr
 auto engine::num_task_schedule() noexcept -> size_t
 {
     // TODO[lab2a]: Add you codes
-    return m_todoTasks.load();
+    return m_task_queue.was_size();
 }
 
 auto engine::schedule() noexcept -> coroutine_handle<>
 {
     // TODO[lab2a]: Add you codes
     auto handle = m_task_queue.pop();
-    m_todoTasks.fetch_sub(1);
     return handle;
 }
 
@@ -50,8 +49,11 @@ auto engine::submit_task(coroutine_handle<> handle) noexcept -> void
 {
     // TODO[lab2a]: Add you codes
     m_task_queue.push(handle);
-    m_todoTasks.fetch_add(1);
     m_uringpxy.write_eventfd(1);
+}
+
+void engine::wake_up(int val){
+    m_uringpxy.write_eventfd(val);
 }
 
 auto engine::exec_one_task() noexcept -> void
@@ -80,6 +82,7 @@ auto engine::poll_submit() noexcept -> void
             m_runningIo.fetch_add(num);
         }
     }
+    m_uringpxy.wait_eventfd();
     if (m_uringpxy.peek_uring()){
         int nready = m_uringpxy.peek_batch_cqe(m_urcqes.data(), m_urcqes.size());
         for (int i = 0; i < nready; ++i){
@@ -88,10 +91,6 @@ auto engine::poll_submit() noexcept -> void
         m_uringpxy.cq_advance(nready);
         m_runningIo.fetch_sub(nready);
     }
-    if (ready()){
-        return;
-    }
-    m_uringpxy.wait_eventfd();
 }
 
 auto engine::add_io_submit() noexcept -> void

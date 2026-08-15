@@ -1083,8 +1083,6 @@ To continue this session, run codex resume 019fe68b-f7be-7290-834d-cd1afe5d85dc
   engine 调 callback 恢复协程
   engine 标记 CQE 已处理
 
-
-
 # lab2a
 
 • 你现在不用急着实现，先把 Lab2a 的关系理顺。可以先只记住一句话：
@@ -1425,3 +1423,627 @@ To continue this session, run codex resume 019fe68b-f7be-7290-834d-cd1afe5d85dc
   任务队列本身：AtomicQueue 负责线程安全
   任务数量/I/O 数量：你用 atomic 负责线程安全
   阻塞唤醒：eventfd 负责，不用 condition_variable
+
+
+
+
+# Lab2b 要做的是：用 Lab2a 的 engine 包一层工作线程，再用 scheduler 管多个 context。
+
+  Lab2a 只有一个 engine，你手动调用：
+
+  poll_submit();
+  exec_one_task();
+
+  Lab2b 要变成：
+
+  scheduler
+    管多个 context
+
+  context
+    每个 context 有一个工作线程
+    每个 context 有一个 engine
+    工作线程不断驱动 engine
+
+  整体关系：
+
+  用户 submit_to_scheduler(task)
+    ↓
+  scheduler 用 dispatcher 选一个 context
+    ↓
+  context.submit_task(handle)
+    ↓
+  context 内部 engine.submit_task(handle)
+    ↓
+  context 的工作线程 run()
+    ↓
+  engine.poll_submit()
+  engine.exec_one_task()
+
+  ———
+
+  context.hpp 要理解什么
+
+  include/coro/context.hpp:61 定义一个 context。
+
+  它的核心成员现在是：
+
+  CORO_ALIGN engine   m_engine;
+  unique_ptr<jthread></jthread> m_job;
+  ctx_id              m_id;
+
+  含义：
+
+  m_engine：真正执行任务和 I/O 的 engine
+  m_job：工作线程
+  m_id：context id
+
+  你还需要加一个引用计数，文档说的 register_wait/unregister_wait 就是为这个：
+
+  std::atomic<int></int> m_wait_count{0};
+
+  或者类似名字。
+
+  为什么需要引用计数？
+  后面 Lab4/Lab5 的协程同步组件会让协程 suspend，但这个协程不在 engine 的普通队列里，也不在 io_uring 里。此时如果 context 只看：
+
+  任务队列空 && I/O 空
+
+  它可能提前退出。引用计数就是告诉 context：
+
+  还有协程挂在同步组件里，不能退出。
+
+  ———
+
+  context::init()
+
+  src/context.cpp:11
+
+  要做：
+
+1. 初始化 m_engine
+2. 绑定线程局部 linfo.ctx = this
+
+  大概职责：
+
+  linfo.ctx = this;
+  m_engine.init();
+
+  注意 m_engine.init() 会绑定 linfo.egn = &m_engine。
+
+  ———
+
+  context::deinit()
+
+  src/context.cpp:16
+
+  要做：
+
+1. m_engine.deinit()
+2. linfo.ctx = nullptr
+
+  ———
+
+  context::start()
+
+  src/context.cpp:21
+
+  框架已经给了：
+
+  m_job = make_unique<jthread></jthread>(
+      [this](stop_token token)
+      {
+          this->init();
+          this->run(token);
+          this->deinit();
+      });
+
+  意思是启动一个工作线程，这个线程里：
+
+  初始化 context
+  运行主循环
+  退出时释放资源
+
+  你一般不需要大改，只要需要时补一点状态即可。
+
+  ———
+
+  context::notify_stop()
+
+  src/context.cpp:33
+
+  它要给 jthread 发停止信号：
+
+  m_job->request_stop();
+
+  但只发 stop 不够，因为工作线程可能正阻塞在 engine.poll_submit() 的 wait_eventfd() 里。
+
+  所以还要唤醒 engine：
+
+  m_engine.get_uring().write_eventfd(1);
+
+  否则线程可能收到了 stop 请求，但睡在 eventfd 上，醒不过来。
+
+  ———
+
+  context::submit_task(handle)
+
+  src/context.cpp:38
+
+  它就是转发给 engine：
+
+  m_engine.submit_task(handle);
+
+  因为真正任务队列在 engine 里。
+
+  ———
+
+  context::register_wait() / unregister_wait()
+
+  src/context.cpp:43
+
+  用于维护“挂起在同步组件里的协程数量”。
+
+  register_wait(n):
+      m_wait_count += n
+
+  unregister_wait(n):
+      m_wait_count -= n
+      如果变成 0，可以唤醒 engine
+
+  为什么 unregister_wait() 可能要唤醒？
+  如果 context 正在等“所有任务结束”，引用计数归零后，它需要重新检查退出条件。
+
+  ———
+
+  context::run(stop_token token)
+
+  src/context.cpp:53
+
+  这是 Lab2b 的核心循环。
+
+  它要不断驱动 engine：
+
+1. poll_submit() 处理 I/O/等待事件
+2. while engine.ready():
+   exec_one_task()
+3. 判断是否应该退出
+
+  退出条件要考虑：
+
+  收到 stop 请求
+  engine 没有普通任务
+  engine 没有 I/O
+  wait_count == 0
+
+  但测试里还有一个要求：单独使用 context 时，没有 scheduler 调 stop，也要能自动退出。所以通常还需要：
+
+  如果没有 scheduler 管理，任务和 I/O 都空了，wait_count 也为 0，也可以退出
+
+  从测试看，他们会这样：
+
+  m_ctx.submit_task(...)
+  m_ctx.start()
+  m_ctx.join()
+
+  中间没有 notify_stop()，所以 run() 不能永远等待 stop。
+
+  ———
+
+  scheduler.hpp 要理解什么
+
+  include/coro/scheduler.hpp:22 是全局调度器，单例。
+
+  用户主要用：
+
+  scheduler::init()
+  submit_to_scheduler(task)
+  scheduler::loop()
+
+  它内部有：
+
+  size_t m_ctx_cnt;
+  detail::ctx_container m_ctxs;
+  detail::dispatcher[config::kDispatchStrategy](config::kDispatchStrategy) m_dispatcher;
+
+  含义：
+
+  m_ctx_cnt：context 数量
+  m_ctxs：所有 context
+  m_dispatcher：决定任务交给哪个 context
+
+  ———
+
+  scheduler::init_impl()
+
+  src/scheduler.cpp:5
+
+  这部分已经基本写好：
+
+  detail::init_meta_info();
+  m_ctx_cnt = ctx_cnt;
+  m_ctxs.reserve(m_ctx_cnt);
+  for (...) {
+      m_ctxs.emplace_back(std::make_unique<context></context>());
+  }
+  m_dispatcher.init(m_ctx_cnt, &m_ctxs);
+
+  它做的是：
+
+  初始化全局信息
+  创建 ctx_cnt 个 context
+  初始化 dispatcher
+
+  如果开了内存池，也在这里初始化。
+
+  ———
+
+  scheduler::submit_task_impl()
+
+  src/scheduler.cpp:41
+
+  现在也基本写好了：
+
+  size_t ctx_id = m_dispatcher.dispatch();
+  m_ctxs[ctx_id]->submit_task(handle);
+
+  它用 dispatcher 选一个 context，然后把任务提交过去。
+
+  ———
+
+  dispatcher 是什么
+
+  include/coro/dispatcher.hpp:60 里当前只有 round-robin：
+
+  auto dispatch() noexcept -> size_t
+  {
+      return m_cur.fetch_add(1, std::memory_order_acq_rel) % m_ctx_cnt;
+  }
+
+  意思是任务轮流分配：
+
+  第 1 个任务 -> context 0
+  第 2 个任务 -> context 1
+  第 3 个任务 -> context 2
+  ...
+
+  它用 atomic，所以多线程提交时也是线程安全的。
+
+  ———
+
+  scheduler::loop_impl()
+
+  src/scheduler.cpp:25
+
+  这是 scheduler 核心。
+
+  文档要求 v1.1 之后：
+
+  启动所有 context
+  等待所有 context 完成任务
+  再统一发送 stop 信号
+  再 join 所有 context
+
+  为什么不让空 context 立刻退出？
+  因为运行中的协程可能之后还会：
+
+  submit_to_scheduler(...)
+
+  如果其他 context 已经退出，scheduler 可能把新任务派给一个死 context。
+
+  所以 scheduler 管理下，context 应该在 loop() 期间保持活着，直到 scheduler 统一 stop。
+
+  大概流程：
+
+  for each ctx:
+      ctx->start();
+
+  等待所有任务自然跑完 / 或轮询状态
+
+  stop_impl();
+
+  for each ctx:
+      ctx->join();
+
+  这里“等待所有任务自然跑完”需要你设计一个判断方式。简单做法可以依赖 context 自己 run 的退出逻辑；但要小心 scheduler 场景不能让空
+  context 过早退出。
+
+  ———
+
+  stop_impl()
+
+  src/scheduler.cpp:30
+
+  已经给了示例：
+
+  for (int i = 0; i < m_ctx_cnt; i++)
+  {
+      m_ctxs[i]->notify_stop();
+  }
+
+  它就是通知所有 context 停止。
+
+  ———
+
+  Lab2b 最关键的状态
+
+  你大概率需要在 context 里加：
+
+  std::atomic<int></int> m_wait_count{0};
+
+  可能还需要：
+
+  std::atomic<bool></bool> m_running{false};
+
+  或者类似状态，帮助 scheduler 判断 context 是否完成。
+
+  但先别过度设计。先目标明确：
+
+  context 单独运行：
+    提交完任务 -> start -> 自动跑完 -> join 返回
+
+  scheduler 运行：
+    init -> submit tasks -> loop
+    所有 context 启动
+    运行中可以继续 submit_to_scheduler
+    所有任务完成后统一停止
+
+  ———
+
+  一句话总结：
+
+  Lab2a 的 engine 是发动机。
+  Lab2b 的 context 是一台装了发动机的工作线程。
+  scheduler 是管理多台工作线程的调度器。
+
+  你现在要做的就是让 context::run() 不断调用 engine 的 poll_submit/exec_one_task，再让 scheduler::loop() 启动、停止、等待多个  context。
+
+
+
+
+
+先别看代码细节，先看运行流程。Lab2b 只有两种使用方式：
+
+1. 单个 context 自己跑
+2. scheduler 管多个 context 跑
+
+  ———
+
+  一、单个 context 怎么跑
+
+  测试里会这样用：
+
+  context ctx;
+
+  ctx.submit_task(task1);
+  ctx.submit_task(task2);
+
+  ctx.start();
+  ctx.join();
+
+  流程是：
+
+  主线程
+    |
+    | submit_task()
+    v
+  context.m_engine.m_task_queue 里有任务
+    |
+    | start()
+    v
+  创建一个工作线程
+    |
+    v
+  工作线程执行 context::run()
+    |
+    v
+  循环驱动 engine:
+      poll_submit()
+      while engine.ready():
+          exec_one_task()
+    |
+    v
+  任务全跑完，没有 I/O，没有等待协程
+    |
+    v
+  run() 退出
+    |
+    v
+  join() 返回
+
+  所以单个 context 的重点是：
+
+  任务跑完后，工作线程要自己退出
+
+  因为测试没有调用：
+
+  ctx.notify_stop();
+
+  ———
+
+  二、scheduler 怎么跑
+
+  用户一般这样写：
+
+  scheduler::init(4);
+
+  submit_to_scheduler(task1);
+  submit_to_scheduler(task2);
+
+  scheduler::loop();
+
+  流程是：
+
+  scheduler::init(4)
+    |
+    v
+  创建 4 个 context
+    context0
+    context1
+    context2
+    context3
+
+  submit_to_scheduler(task1)
+    |
+    v
+  dispatcher 选一个 context，比如 context0
+    |
+    v
+  context0.submit_task(task1)
+
+  submit_to_scheduler(task2)
+    |
+    v
+  dispatcher 选下一个 context，比如 context1
+    |
+    v
+  context1.submit_task(task2)
+
+  scheduler::loop()
+    |
+    v
+  启动所有 context 的工作线程
+    |
+    v
+  每个 context::run() 驱动自己的 engine
+
+  ———
+
+  关键区别
+
+  单个 context：
+
+  任务跑完就退出
+
+  scheduler 管理多个 context：
+
+  不能让空 context 太早退出
+
+  为什么？
+
+  假设有 4 个 context，但最开始只有 1 个任务：
+
+  context0 有任务
+  context1 空
+  context2 空
+  context3 空
+
+  如果空 context 看到自己没任务就退出了：
+
+  context1 退出
+  context2 退出
+  context3 退出
+
+  然后 context0 里的任务运行中又调用：
+
+  submit_to_scheduler(new_task);
+
+  scheduler 可能把 new_task 派给 context1。
+  但 context1 已经退出了，任务就没人执行。
+
+  所以 scheduler 模式下：
+
+  context 即使暂时没任务，也要先活着
+  直到 scheduler 统一通知 stop
+
+  ———
+
+  你可以这样理解职责
+
+  context 的职责：
+
+  我有一个 engine 和一个工作线程；
+  我负责在线程里不断驱动 engine；
+  别人可以给我提交任务；
+  收到停止信号且任务都做完后，我退出。
+
+  scheduler 的职责：
+
+  我有很多 context；
+  我决定任务交给哪个 context；
+  我启动所有 context；
+  我等所有任务做完；
+  我统一通知所有 context 停止；
+  我 join 所有 context。
+
+  ———
+
+  context::run() 心智模型
+
+  它就是 worker loop：
+
+  while (true)
+  {
+      m_engine.poll_submit();
+
+    while (m_engine.ready())
+      {
+          m_engine.exec_one_task();
+      }
+
+    if (可以退出)
+      {
+          break;
+      }
+  }
+
+  退出条件大概是：
+
+  engine 没普通任务
+  engine 没 I/O
+  没有挂起等待的协程
+  并且：
+      单 context 模式：可以自己退出
+      scheduler 模式：收到 stop 信号后退出
+
+  ———
+
+  scheduler::loop() 心智模型
+
+  for each context:
+      context.start();
+
+  等待整体任务完成;
+
+  for each context:
+      context.notify_stop();
+
+  for each context:
+      context.join();
+
+  ———
+
+  最容易混的点
+
+  scheduler 不执行协程。
+  真正执行协程的是：
+
+  context 里的工作线程
+
+  scheduler 只负责：
+
+  创建 context
+  分发任务
+  控制启动和停止
+
+  context 也不直接懂 io_uring。
+  真正处理 I/O 的是：
+
+  engine
+
+  层级是：
+
+  scheduler
+    管多个 context
+
+  context
+    管一个线程 + 一个 engine
+
+  engine
+    管任务队列 + io_uring
+
+  ———
+
+  一句话总结：
+
+  scheduler 是老板，context 是工人，engine 是工人手里的机器。
+  老板分配任务，工人开线程干活，机器真正执行协程和 I/O。

@@ -70,12 +70,24 @@ private:
     [[CORO_TEST_USED(lab2b)]] auto submit_task_impl(std::coroutine_handle<> handle) noexcept -> void;
 
     // TODO[lab2b]: Add more function if you need
+    auto try_mark_context_finished(size_t ctx_id) noexcept -> void;
+
+    auto wait_all_context_finished() noexcept -> void;
+
+    enum context_state : int
+    {
+        kContextRunning   = 0,
+        kContextFinishing = 1,
+        kContextFinished  = 2,
+    };
 
 private:
     size_t                                              m_ctx_cnt{0};
     detail::ctx_container                               m_ctxs;
     detail::dispatcher<coro::config::kDispatchStrategy> m_dispatcher;
     // TODO[lab2b]: Add more member variables if you need
+    std::vector<std::atomic<int>>       m_context_states;
+    std::atomic<size_t>                 m_unfinished_context_count{0};
 
 #ifdef ENABLE_MEMORY_ALLOC
     // Memory Allocator
