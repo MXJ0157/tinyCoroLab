@@ -36,7 +36,6 @@ auto context::start() noexcept -> void
         {
             this->init();
             this->run(token);
-            this->deinit();
         });
 }
 

@@ -88,7 +88,11 @@ public:
      * @brief wait work thread stop
      *
      */
-    inline auto join() noexcept -> void { m_job->join(); }
+    inline auto join() noexcept -> void
+    {
+        m_job->join();
+        deinit();
+    }
 
     inline auto submit_task(task<void>&& task) noexcept -> void
     {

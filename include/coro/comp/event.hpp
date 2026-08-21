@@ -49,26 +49,147 @@ template<typename return_type = void>
 class event
 {
     // Just make compile success
-    struct awaiter : detail::noop_awaiter
+    struct event_awaiter : detail::noop_awaiter
     {
-        auto await_resume() -> return_type { return {}; }
+        event* event_ptr;
+        context* ctx;
+        event_awaiter* next;
+        std::coroutine_handle<> parent;
+
+        event_awaiter(event* eptr, context* cur_ctx) : event_ptr(eptr), ctx(cur_ctx), next(nullptr){}
+        
+        bool await_ready() const noexcept {
+            this->ctx->register_wait(1);
+            if (event_ptr->is_set()){
+                return true;
+            }
+            return false;
+        }
+
+        bool await_suspend(std::coroutine_handle<> handle) noexcept{
+            parent = handle;
+            return event_ptr->add_awaiter(this);
+        }
+
+        auto await_resume() -> return_type{
+            this->ctx->unregister_wait(1);
+            return event_ptr->val;
+        }
     };
 
-public:
-    auto wait() noexcept -> awaiter { return {}; } // return awaitable
+    atomic<detail::awaiter_ptr> cur_state{nullptr};
+    return_type val;
+    friend struct event_awaiter;
 
-    template<typename value_type>
-    auto set(value_type&& value) noexcept -> void
+public:
+    bool is_set(){
+        return cur_state.load() == this;
+    }
+
+    bool add_awaiter(event_awaiter* waiter){
+        detail::awaiter_ptr old_value = nullptr;
+        // 利用 cas 操作确保挂载操作的原子性
+        do{
+            old_value = cur_state.load(std::memory_order_acquire);
+            if (old_value == this){
+                waiter->next = nullptr;
+                return false;
+            }
+            waiter->next = static_cast<event_awaiter*>(old_value);
+        }
+        while (!cur_state.compare_exchange_weak(old_value, waiter, std::memory_order_acq_rel));
+
+        return true;
+    }
+
+    auto wait() noexcept -> event_awaiter{
+        return event_awaiter{ this, linfo.ctx };
+    } // return awaitable
+
+    auto set(const return_type& value) noexcept -> void
     {
+        val = value;
+        detail::awaiter_ptr ex_state = cur_state.exchange(this);
+        if (ex_state != this){
+            event_awaiter* h = static_cast<event_awaiter*>(ex_state);
+            while (h){
+                auto next = h->next;
+                h->ctx->submit_task(h->parent);
+                h = next;
+            }
+        }
     }
 };
 
 template<>
-class event<>
-{
+class event<>{
+    // Just make compile success
+    struct event_awaiter : detail::noop_awaiter{
+        event* event_ptr;
+        context* ctx;
+        event_awaiter* next;
+        std::coroutine_handle<> parent;
+
+        event_awaiter(event* eptr, context* cur_ctx) : event_ptr(eptr), ctx(cur_ctx), next(nullptr){}
+
+        bool await_ready() const noexcept{
+            this->ctx->register_wait(1);
+            if (event_ptr->is_set()){
+                return true;
+            }
+            return false;
+        }
+
+        bool await_suspend(std::coroutine_handle<> handle) noexcept{
+            parent = handle;
+            return event_ptr->add_awaiter(this);
+        }
+
+        auto await_resume() -> void {
+            this->ctx->unregister_wait(1);
+            return;
+        }
+    };
+
+    atomic<detail::awaiter_ptr> cur_state{ nullptr };
+    friend struct event_awaiter;
+
 public:
-    auto wait() noexcept -> detail::noop_awaiter { return {}; } // return awaitable
-    auto set() noexcept -> void {}
+    bool is_set(){
+        return cur_state.load() == this;
+    }
+
+    bool add_awaiter(event_awaiter* waiter){
+        detail::awaiter_ptr old_value = nullptr;
+        // 利用 cas 操作确保挂载操作的原子性
+        do{
+            old_value = cur_state.load(std::memory_order_acquire);
+            if (old_value == this){
+                waiter->next = nullptr;
+                return false;
+            }
+            waiter->next = static_cast<event_awaiter*>(old_value);
+        }
+        while (!cur_state.compare_exchange_weak(old_value, waiter, std::memory_order_acq_rel));
+
+        return true;
+    }
+
+    auto wait() noexcept -> event_awaiter{
+        return event_awaiter{ this, linfo.ctx };
+    } // return awaitable
+
+    auto set() noexcept -> void{
+        detail::awaiter_ptr ex_state = cur_state.exchange(this);
+        if (ex_state != this){
+            event_awaiter* h = static_cast<event_awaiter*>(ex_state);
+            while (h){
+                auto next = h->next;
+                h->ctx->submit_task(h->parent);
+                h = next;
+            }
+        }
+    }
 };
 
 /**
