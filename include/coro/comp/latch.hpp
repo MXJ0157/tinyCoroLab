@@ -13,7 +13,7 @@
 #include <atomic>
 
 #include "coro/detail/types.hpp"
-
+#include "event.hpp"
 namespace coro
 {
 /**
@@ -37,16 +37,26 @@ namespace coro
 // but keep the function count_down() and wait()'s declaration same with example.
 class latch
 {
+    using event_t = event<>;
+    event_t ev;
+    atomic<uint64_t> ref_count;
 public:
-    latch(std::uint64_t count) noexcept {}
+    latch(std::uint64_t count) noexcept : ref_count(count), ev(count == 0) {}
     latch(const latch&)                    = delete;
     latch(latch&&)                         = delete;
     auto operator=(const latch&) -> latch& = delete;
     auto operator=(latch&&) -> latch&      = delete;
 
-    auto count_down() noexcept -> void {}
+    auto count_down() noexcept -> void{
+        auto old = ref_count.fetch_sub(1, std::memory_order_acq_rel);
+        if (old == 1){
+            ev.set();
+        }
+    }
 
-    auto wait() noexcept -> detail::noop_awaiter { return {}; }
+    auto wait() noexcept {
+        return ev.wait();
+    }
 };
 
 /**

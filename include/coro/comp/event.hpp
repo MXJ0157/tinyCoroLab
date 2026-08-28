@@ -155,6 +155,8 @@ class event<>{
     friend struct event_awaiter;
 
 public:
+    event(bool initial_state = false) : cur_state(initial_state ? this : nullptr){}
+    
     bool is_set(){
         return cur_state.load() == this;
     }
