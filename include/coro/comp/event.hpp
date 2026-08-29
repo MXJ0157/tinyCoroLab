@@ -89,17 +89,17 @@ public:
     bool add_awaiter(event_awaiter* waiter){
         detail::awaiter_ptr old_value = nullptr;
         // 利用 cas 操作确保挂载操作的原子性
-        do{
+        while(1){
             old_value = cur_state.load(std::memory_order_acquire);
             if (old_value == this){
                 waiter->next = nullptr;
                 return false;
             }
             waiter->next = static_cast<event_awaiter*>(old_value);
+            if (cur_state.compare_exchange_weak(old_value, waiter, std::memory_order_acq_rel)){
+                return true;
+            }
         }
-        while (!cur_state.compare_exchange_weak(old_value, waiter, std::memory_order_acq_rel));
-
-        return true;
     }
 
     auto wait() noexcept -> event_awaiter{
