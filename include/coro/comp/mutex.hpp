@@ -17,7 +17,7 @@
 
 #include "coro/comp/mutex_guard.hpp"
 #include "coro/detail/types.hpp"
-
+#include "coro/context.hpp"
 namespace coro
 {
 /**
@@ -43,25 +43,96 @@ class context;
 // but keep the member function and construct function's declaration same with example.
 class mutex
 {
-    // Just make lock_guard() compile success
-    struct guard_awaiter : detail::noop_awaiter
-    {
-        guard_awaiter(mutex& m) noexcept : mtx(m) {}
-        auto   await_resume() -> detail::lock_guard<mutex> { return detail::lock_guard<mutex>(mtx); }
+    struct mutex_awaiter{
         mutex& mtx;
+        context& ctx;
+        mutex_awaiter* next;
+        std::coroutine_handle<> parent;
+
+        mutex_awaiter(mutex& m, context& c) noexcept : mtx(m), ctx(c), next(nullptr){}
+
+        bool await_ready(){
+            this->ctx.register_wait(1);
+            return mtx.try_lock();
+        }
+
+        bool await_suspend(std::coroutine_handle<> handle){
+            parent = handle;
+            return this->mtx.add_awaiter(this);
+        }
+
+        auto await_resume() -> void{
+            this->ctx.unregister_wait(1);
+            return;
+        }
     };
+    // Just make lock_guard() compile success
+    struct guard_awaiter : mutex_awaiter
+    {
+        guard_awaiter(mutex& m, context& c) noexcept : mutex_awaiter(m,c){}
+        auto  await_resume() -> detail::lock_guard<mutex>{
+            mutex_awaiter::await_resume();
+            return detail::lock_guard<mutex>(mtx);
+        }
+    };
+
+    friend struct guard_awaiter;
+
+    //0:未加锁, 1: 已经加锁但无等待, 其他: 已经加锁并且有其他协程等待
+    const detail::awaiter_ptr UNLOCKED = reinterpret_cast<detail::awaiter_ptr>(1);
+    const detail::awaiter_ptr LOCKED_NO_WAIT = reinterpret_cast<detail::awaiter_ptr>(0);
+    std::atomic<detail::awaiter_ptr> cur_state{ UNLOCKED };
 
 public:
     mutex() noexcept {}
     ~mutex() noexcept {}
 
-    auto try_lock() noexcept -> bool { return {}; }
+    bool add_awaiter(mutex_awaiter* waiter){
+        //1: 已经加锁但无等待, 其他: 已经加锁并且有其他协程等待
+        detail::awaiter_ptr old_value = nullptr;
+        while (1){
+            if (try_lock()){
+                return false;
+            }
+            old_value = cur_state.load();
+            if (old_value != UNLOCKED){
+                waiter->next = static_cast<mutex_awaiter*>(old_value);
+                if (cur_state.compare_exchange_weak(old_value, waiter, std::memory_order_acq_rel)){
+                    return true;
+                }
+            }
+        }
+    }
 
-    auto lock() noexcept -> detail::noop_awaiter { return {}; };
+    auto try_lock() noexcept -> bool{
+        auto nonLocked = UNLOCKED;
+        return cur_state.compare_exchange_strong(nonLocked, LOCKED_NO_WAIT, std::memory_order_acq_rel);
+    }
 
-    auto unlock() noexcept -> void {};
+    auto lock() noexcept -> mutex_awaiter{
+        return { *this , local_context()};
+    };
 
-    auto lock_guard() noexcept -> guard_awaiter { return {*this}; };
+    auto unlock() noexcept -> void{
+        detail::awaiter_ptr old_value = nullptr, next = nullptr;
+        while (1){
+            old_value = LOCKED_NO_WAIT;
+            if (cur_state.compare_exchange_weak(old_value, UNLOCKED, std::memory_order_acq_rel)){
+                return;
+            }
+            old_value = cur_state.load();
+            if (old_value != LOCKED_NO_WAIT){
+                next = static_cast<mutex_awaiter*>(old_value)->next;
+                if (cur_state.compare_exchange_weak(old_value, next, std::memory_order_acq_rel)){
+                    mutex_awaiter* h = static_cast<mutex_awaiter*>(old_value);
+                    h->ctx.submit_task(h->parent);
+                    return;
+                }
+            }
+        }
+    }
+
+    auto lock_guard() noexcept -> guard_awaiter { return {*this, local_context()}; };
 };
 
 }; // namespace coro
