@@ -43,6 +43,7 @@ class context;
 // but keep the member function and construct function's declaration same with example.
 class mutex
 {
+public:
     struct mutex_awaiter{
         mutex& mtx;
         context& ctx;
@@ -58,12 +59,18 @@ class mutex
 
         bool await_suspend(std::coroutine_handle<> handle){
             parent = handle;
-            return this->mtx.add_awaiter(this);
+            return this->mtx.lock_or_add(this);
         }
 
         auto await_resume() -> void{
             this->ctx.unregister_wait(1);
             return;
+        }
+
+        //阻塞在mutex上的协程被唤醒之后:提交到任务队列中执行
+        //阻塞在condition_variable上的协程被唤醒之后,先拿到锁(如果拿不到再次阻塞在mute上,被唤醒之后已经拿到锁了),然后再次检查条件是否满足
+        virtual auto resume() -> void{
+            ctx.submit_task(parent);
         }
     };
     // Just make lock_guard() compile success
@@ -78,6 +85,7 @@ class mutex
 
     friend struct guard_awaiter;
 
+private:
     //0:未加锁, 1: 已经加锁但无等待, 其他: 已经加锁并且有其他协程等待
     const detail::awaiter_ptr UNLOCKED = reinterpret_cast<detail::awaiter_ptr>(1);
     const detail::awaiter_ptr LOCKED_NO_WAIT = reinterpret_cast<detail::awaiter_ptr>(0);
@@ -87,7 +95,8 @@ public:
     mutex() noexcept {}
     ~mutex() noexcept {}
 
-    bool add_awaiter(mutex_awaiter* waiter){
+    //加锁成功或者添加到mutex的阻塞队列中
+    bool lock_or_add(mutex_awaiter* waiter){
         //1: 已经加锁但无等待, 其他: 已经加锁并且有其他协程等待
         detail::awaiter_ptr old_value = nullptr;
         while (1){
@@ -124,8 +133,8 @@ public:
             if (old_value != LOCKED_NO_WAIT){
                 next = static_cast<mutex_awaiter*>(old_value)->next;
                 if (cur_state.compare_exchange_weak(old_value, next, std::memory_order_acq_rel)){
-                    mutex_awaiter* h = static_cast<mutex_awaiter*>(old_value);
-                    h->ctx.submit_task(h->parent);
+                    auto h = static_cast<mutex_awaiter*>(old_value);
+                    h->resume();
                     return;
                 }
             }
