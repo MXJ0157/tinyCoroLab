@@ -59,10 +59,24 @@ void engine::wake_up(int val){
 auto engine::exec_one_task() noexcept -> void
 {
     auto coro = schedule();
-    coro.resume();
-    if (coro.done())
+
+    auto task_coro = ::coro::coroutine_handle::from_address(coro.address());
+    auto cleanup_coro = task_coro.promise().detached_root;
+
+    // A non-detached top-level task is still owned by its task object, so its
+    // frame remains valid after resume() and clean() will intentionally do
+    // nothing.  An awaited child without a detached root has no stable handle
+    // that the engine may inspect after resume().
+    if (!cleanup_coro && !task_coro.promise().parent)
     {
-        clean(coro);
+        cleanup_coro = coro;
+    }
+
+    coro.resume();
+
+    if (cleanup_coro && cleanup_coro.done())
+    {
+        clean(cleanup_coro);
     }
 }
 

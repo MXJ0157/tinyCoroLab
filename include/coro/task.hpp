@@ -49,6 +49,15 @@ struct promise_base
     ~promise_base()         = default;
 
     std::coroutine_handle<> parent{nullptr};
+    // The detached top-level task that owns the currently executing task chain.
+    //
+    // A suspended child task may be submitted to an engine by an awaiter.  When
+    // that child finishes, final_suspend() immediately transfers execution back
+    // to its parent, as required by lab1.  The parent can then destroy the child
+    // task before engine::exec_one_task() returns from resume().  Keeping the
+    // detached root separately lets the engine inspect and clean the stable
+    // owner instead of touching that possibly destroyed child frame.
+    std::coroutine_handle<> detached_root{nullptr};
     bool detached{ false };
 
     constexpr auto initial_suspend() noexcept{ return std::suspend_always{}; }
@@ -187,6 +196,9 @@ public:
         {
             // TODO[lab1]: Add you codes
             m_coroutine.promise().parent = awaiting_coroutine;
+            auto parent = std::coroutine_handle<detail::promise_base>::from_address(
+                awaiting_coroutine.address());
+            m_coroutine.promise().detached_root = parent.promise().detached_root;
             return m_coroutine;
         }
 
@@ -254,6 +266,7 @@ public:
     {
         // TODO[lab1]: Add you codes
         m_coroutine.promise().detached = true;
+        m_coroutine.promise().detached_root = m_coroutine;
         m_coroutine = nullptr;
     }
 
