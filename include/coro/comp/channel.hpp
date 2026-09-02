@@ -80,7 +80,7 @@ public:
         if (cur_state == CLOSED){
             co_return false;
         }
-        data_array[tail] = value;
+        data_array[tail] = std::forward<value_type>(value);
         if (head == tail){
             consumer_cv.notify_one();
         }
@@ -98,7 +98,7 @@ public:
         if (cur_state == CLOSED && cur_num == 0){
             co_return std::nullopt;
         }
-        auto res = data_array[head];
+        auto res = std::move(data_array[head]);
         if (cur_num == capacity){
             producer_cv.notify_one();
         }
